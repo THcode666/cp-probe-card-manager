@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 运行时数据（数据库/备份/导出/配置——不要上传到公开仓库）
+data/
+exports/
+backups/
+config.ini
+
+# 打包产物
+dist/
+build/
+*.spec
+
+# 测试与临时产物
+.pytest_cache/
+_render_out/
+*.log
