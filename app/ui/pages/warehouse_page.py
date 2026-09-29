@@ -95,15 +95,13 @@ class WarehousePage(QWidget):
             p["id"]: self.ctx.purchases_repo.in_transit_qty(p["id"])
             for p in self.ctx.products_repo.list_all()
         }
-        use_count_all: dict[int, int] = {}
-        for r in self.ctx.cards_repo.list_cards(status="在用"):
-            for pid in self.ctx.cards_repo.product_ids_of_card(r["id"]):
-                use_count_all[pid] = use_count_all.get(pid, 0) + 1
+        # 单条 SQL 分组统计，替代逐卡 N+1 查询
+        use_count_all = self.ctx.cards_repo.count_by_product("在用")
+        stock_all = self.ctx.warehouse.stock_count_by_product()
         rows = []
         for d in self.ctx.demand.compute_all():
-            stock = self.ctx.warehouse.stock_count_by_product().get(d.product_id, 0)
             gap = d.three_card_gap
-            rows.append([d.product_name, stock, min_cards,
+            rows.append([d.product_name, stock_all.get(d.product_id, 0), min_cards,
                          alert_badge("红色预警" if gap else "正常"),
                          use_count_all.get(d.product_id, 0), in_transit_all.get(d.product_id, 0)])
         fill_table(self.product_table, rows, align_center_cols={1, 2, 3, 4, 5})
@@ -111,13 +109,13 @@ class WarehousePage(QWidget):
     def _refresh_cards(self):
         status = self.status_filter.currentText()
         rows = []
+        # 列表 SQL 已带最近一次更新（last_update_date/last_touches/last_len），无需逐卡再查
         for r in self.ctx.cards_repo.list_cards(status=status):
-            latest = self.ctx.cards_repo.latest_update(r["id"])
             rows.append([
                 r["name"], r["product_names"], r["status"],
-                latest["update_date"] if latest else "—",
-                latest["cum_touches"] if latest else None,
-                latest["needle_len"] if latest else None,
+                r["last_update_date"] or "—",
+                r["last_touches"],
+                r["last_len"],
             ])
         fill_table(self.cards_table, rows, align_center_cols={2, 3, 4, 5})
 

@@ -14,6 +14,14 @@
 3. 寿命达成率 = touches_at_scrap / 生效额定寿命，低于配置阈值分级预警。
 4. 消耗速度：优先取最近两次更新的 (测试量差 / 天数差)；不足时退化为
    首末两点平均速度，用于估算预计报废日期。
+
+性能设计（重构优化，老电脑/大数据量场景）
+========================================
+- 结果缓存：单卡预测、产品类型曲线、全量预测均按"数据版本"缓存；
+  本进程任何写操作（仓储层版本号）或其他客户端提交（Database.data_version）
+  都会使缓存整体失效，多人共享盘场景下不会读到过期结果。
+- 全量预测走批量装载：卡列表/卡-产品关联/产品表/全部数据点各一条 SQL，
+  内存中完成拟合，不再"每张卡发 4~6 条查询"（N+1）。
 """
 
 from __future__ import annotations
@@ -71,6 +79,28 @@ class PredictionService:
         self.cards = cards_repo
         self.products = products_repo
         self.settings = settings_repo
+        # ---- 缓存：键为数据版本元组，任何变化整体失效 ----
+        self._pred_cache: dict[int, tuple[tuple, CardPrediction]] = {}
+        self._curve_cache: dict[int, tuple[tuple, tuple[float, float] | None, int]] = {}
+        self._all_cache: tuple[tuple, list[CardPrediction]] | None = None
+        self._prod_rows: tuple[int, dict[int, object]] = (-1, {})  # (products.data_version, {id: row})
+
+    # ---------- 缓存版本 ----------
+
+    def _cache_versions(self) -> tuple:
+        return (
+            self.cards.data_version,
+            self.products.data_version,
+            self.settings.data_version,
+            self.cards.db.data_version(),
+        )
+
+    def _product_row(self, pid: int):
+        """产品行内存缓存（产品数量少、极少变动，避免逐卡重复查询）。"""
+        ver = self.products.data_version
+        if self._prod_rows[0] != ver:
+            self._prod_rows = (ver, {p["id"]: p for p in self.products.list_all(include_inactive=True)})
+        return self._prod_rows[1].get(pid)
 
     # ---------- 配置项 ----------
 
@@ -101,9 +131,19 @@ class PredictionService:
     # ---------- 拟合 ----------
 
     def product_curve_for(self, product_id: int) -> tuple[float, float] | None:
-        """同产品全部针卡汇总拟合的平均磨损曲线 (b, a)。"""
+        """同产品全部针卡汇总拟合的平均磨损曲线 (b, a)。带版本缓存。"""
+        return self._curve_with_size(product_id)[0]
+
+    def _curve_with_size(self, product_id: int) -> tuple[tuple[float, float] | None, int]:
+        """带缓存返回 (拟合曲线, 数据点数)；点数用于多产品卡选择最优曲线，免重复查询。"""
+        key = self._cache_versions()
+        hit = self._curve_cache.get(product_id)
+        if hit and hit[0] == key:
+            return hit[1], hit[2]
         pts = self.cards.update_points_for_product(product_id)
-        return _linear_fit([p["cum_touches"] for p in pts], [p["needle_len"] for p in pts])
+        fit = _linear_fit([p["cum_touches"] for p in pts], [p["needle_len"] for p in pts])
+        self._curve_cache[product_id] = (key, fit, len(pts))
+        return fit, len(pts)
 
     def _touches_at_scrap(self, slope: float, intercept: float) -> float | None:
         if slope >= 0:  # 针长不随测试量下降，数据异常，不外推
@@ -116,7 +156,7 @@ class PredictionService:
             return float(card_row["rated_touches"])
         rated = 0.0
         for pid in product_ids:
-            p = self.products.get(pid)
+            p = self._product_row(pid)
             if p and p["rated_touches"]:
                 rated = max(rated, float(p["rated_touches"]))
         return rated if rated > 0 else self.default_rated
@@ -143,23 +183,68 @@ class PredictionService:
     # ---------- 预测 ----------
 
     def predict_card(self, card_id: int) -> CardPrediction:
-        pred = CardPrediction(card_id=card_id)
+        key = self._cache_versions()
+        hit = self._pred_cache.get(card_id)
+        if hit and hit[0] == key:
+            return hit[1]
         card = self.cards.get(card_id)
         if not card:
-            return pred
+            pred = CardPrediction(card_id=card_id)
+        else:
+            product_ids = self.cards.product_ids_of_card(card_id)
+            updates = self.cards.updates_for_card(card_id)
+            pred = self._build_prediction(card, product_ids, updates)
+        self._pred_cache[card_id] = (key, pred)
+        return pred
+
+    def predict_all(self) -> list[CardPrediction]:
+        key = self._cache_versions()
+        if self._all_cache is not None and self._all_cache[0] == key:
+            return self._all_cache[1]
+        card_rows = self.cards.list_cards()
+        if len(card_rows) <= 20:
+            # 小数据量直接走单卡路径（结果同样进入单卡缓存）
+            preds = [self.predict_card(r["id"]) for r in card_rows]
+        else:
+            preds = self._predict_all_bulk(card_rows)
+        self._all_cache = (key, preds)
+        return preds
+
+    def _predict_all_bulk(self, card_rows: list) -> list[CardPrediction]:
+        """批量装载：4 条 SQL 取回全部输入，内存中逐卡拟合（消除 N+1）。"""
+        pair_rows = self.cards.db.query("SELECT card_id, product_id FROM card_products")
+        pids_by_card: dict[int, list[int]] = {}
+        for r in pair_rows:
+            pids_by_card.setdefault(r["card_id"], []).append(r["product_id"])
+        update_rows = self.cards.db.query(
+            "SELECT * FROM card_updates ORDER BY update_date, id"
+        )
+        updates_by_card: dict[int, list] = {}
+        for r in update_rows:
+            updates_by_card.setdefault(r["card_id"], []).append(r)
+
+        preds = []
+        key = self._cache_versions()
+        for card in card_rows:
+            updates = updates_by_card.get(card["id"], [])
+            pred = self._build_prediction(card, pids_by_card.get(card["id"], []), updates)
+            self._pred_cache[card["id"]] = (key, pred)
+            preds.append(pred)
+        return preds
+
+    def _build_prediction(self, card, product_ids: list[int], updates: list) -> CardPrediction:
+        """单卡预测核心。updates 任意排序，内部自行排序；产品行走内存缓存。"""
+        pred = CardPrediction(card_id=card["id"])
         pred.card_name = card["name"]
         pred.status = card["status"]
-
-        product_ids = self.cards.product_ids_of_card(card_id)
         names = []
         for pid in product_ids:
-            p = self.products.get(pid)
+            p = self._product_row(pid)
             if p:
                 names.append(p["name"])
         pred.product_names = ", ".join(names)
         pred.rated_touches = self._effective_rated(card, product_ids)
 
-        updates = self.cards.updates_for_card(card_id)
         pred.points_count = len(updates)
         if not updates:
             return pred
@@ -168,7 +253,7 @@ class PredictionService:
         pred.last_len = float(last["needle_len"])
         pred.last_update_date = last["update_date"]
 
-        pts = self.cards.update_points_for_card(card_id)
+        pts = sorted(updates, key=lambda r: r["cum_touches"])
         xs = [float(p["cum_touches"]) for p in pts]
         ys = [float(p["needle_len"]) for p in pts]
 
@@ -185,10 +270,9 @@ class PredictionService:
             best: tuple[float, float] | None = None
             best_n = -1
             for pid in product_ids:
-                pool = self.cards.update_points_for_product(pid)
-                fit = _linear_fit([float(p["cum_touches"]) for p in pool], [float(p["needle_len"]) for p in pool])
-                if fit and len(pool) > best_n:
-                    best, best_n = fit, len(pool)
+                fit, n = self._curve_with_size(pid)
+                if fit and n > best_n:
+                    best, best_n = fit, n
                     pred.product_curve = fit
             if best:
                 touches_at_scrap = self._touches_at_scrap(*best)
@@ -224,11 +308,8 @@ class PredictionService:
             return AlertLevel.YELLOW
         return AlertLevel.OK
 
-    def predict_all(self) -> list[CardPrediction]:
-        return [self.predict_card(row["id"]) for row in self.cards.list_cards()]
-
     def scrap_remind_cards(self) -> list[CardPrediction]:
-        """预计报废日期落在提醒窗口内、且仍在用的卡。"""
+        """预计报废日期落在提醒窗口内、且仍在用的卡（复用 predict_all 缓存）。"""
         today = _dt.date.today()
         horizon = today + _dt.timedelta(days=self.scrap_remind_days)
         result = []

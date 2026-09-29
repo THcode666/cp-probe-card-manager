@@ -46,17 +46,13 @@ class WarehouseService:
     # ---------- 统计 ----------
 
     def status_counts(self) -> dict[str, int]:
-        rows = self.cards.list_cards()
+        """各状态卡数，单条 SQL（替代全表遍历）。"""
+        rows = self.cards.db.query("SELECT status, COUNT(*) AS n FROM cards GROUP BY status")
         counts = {s.value: 0 for s in CardStatus}
         for r in rows:
-            counts[r["status"]] = counts.get(r["status"], 0) + 1
+            counts[r["status"]] = r["n"]
         return counts
 
     def stock_count_by_product(self) -> dict[int, int]:
         """每个产品名下的【在库】卡数（兼容多产品：一张在库卡为它的每个产品 +1）。"""
-        rows = self.cards.list_cards(status=CardStatus.IN_STOCK)
-        counts: dict[int, int] = {}
-        for r in rows:
-            for pid in self.cards.product_ids_of_card(r["id"]):
-                counts[pid] = counts.get(pid, 0) + 1
-        return counts
+        return self.cards.count_by_product(CardStatus.IN_STOCK)

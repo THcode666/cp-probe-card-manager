@@ -32,6 +32,11 @@ SETTING_BOUNDS: dict[str, tuple[float, float]] = {
 class SettingsRepo:
     def __init__(self, db: Database):
         self.db = db
+        # 版本号：配置修改 +1，供预测/需求缓存失效判断
+        self.data_version = 0
+
+    def _bump(self) -> None:
+        self.data_version += 1
 
     def ensure_defaults(self) -> None:
         """首次建库时写入出厂默认值（已存在的键不覆盖，保留工程师改过的值）；
@@ -78,3 +83,4 @@ class SettingsRepo:
             "UPDATE settings SET value = ?, updated_at = ?, updated_by = ? WHERE key = ?",
             (value, timeutil.now_str(), operator, key),
         )
+        self._bump()

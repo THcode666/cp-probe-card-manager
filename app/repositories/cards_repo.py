@@ -26,6 +26,12 @@ LEFT JOIN card_updates lu ON lu.id = m.mid
 class CardsRepo:
     def __init__(self, db: Database):
         self.db = db
+        # 本进程内"针卡相关数据"的版本号：任何写操作 +1。
+        # 供预测/需求缓存做失效判断（配合 Database.data_version 感知其他客户端的修改）。
+        self.data_version = 0
+
+    def _bump(self) -> None:
+        self.data_version += 1
 
     # ---------- 卡片 ----------
 
@@ -80,6 +86,7 @@ class CardsRepo:
                     (card_id, pid),
                 )
             return card_id
+        self._bump()
         return self.db.transaction(_do)  # type: ignore[return-value]
 
     def update(self, card_id: int, data: dict) -> None:
@@ -96,6 +103,7 @@ class CardsRepo:
                         (card_id, pid),
                     )
         self.db.transaction(_do)
+        self._bump()
 
     def set_status(self, card_id: int, status: str, operator: str, module: str = "仓库") -> None:
         """状态流转并自动记日志、报废时记报废日期。"""
@@ -120,15 +128,28 @@ class CardsRepo:
                 ),
             )
         self.db.transaction(_do)
+        self._bump()
 
     def delete(self, card_id: int) -> None:
         self.db.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+        self._bump()
 
     def product_ids_of_card(self, card_id: int) -> list[int]:
         rows = self.db.query(
             "SELECT product_id FROM card_products WHERE card_id = ? ORDER BY product_id", (card_id,)
         )
         return [r["product_id"] for r in rows]
+
+    def count_by_product(self, status: Optional[str] = None) -> dict[int, int]:
+        """{product_id: 卡数}，单条 SQL 分组完成（替代逐卡 N+1 查询）。"""
+        sql = ("SELECT cp.product_id AS pid, COUNT(*) AS n "
+               "FROM card_products cp JOIN cards c ON c.id = cp.card_id ")
+        params: tuple = ()
+        if status:
+            sql += "WHERE c.status = ? "
+            params = (status,)
+        sql += "GROUP BY cp.product_id"
+        return {r["pid"]: r["n"] for r in self.db.query(sql, params)}
 
     # ---------- 更新记录 ----------
 
@@ -141,11 +162,13 @@ class CardsRepo:
         operator: str,
         note: str = "",
     ) -> int:
-        return self.db.execute(
+        new_id = self.db.execute(
             "INSERT INTO card_updates (card_id, update_date, cum_touches, needle_len, operator, note, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (card_id, update_date, cum_touches, needle_len, operator, note, timeutil.now_str()),
         )
+        self._bump()
+        return new_id
 
     def updates_for_card(self, card_id: int) -> list[sqlite3.Row]:
         return self.db.query(
@@ -160,6 +183,7 @@ class CardsRepo:
 
     def delete_update(self, update_id: int) -> None:
         self.db.execute("DELETE FROM card_updates WHERE id = ?", (update_id,))
+        self._bump()
 
     def update_points_for_product(self, product_id: int) -> list[sqlite3.Row]:
         """某产品全部针卡（含已报废，报废卡的完整寿命对拟合最宝贵）的磨损数据点。"""

@@ -11,6 +11,11 @@ from app.utils import timeutil
 class PlanningRepo:
     def __init__(self, db: Database):
         self.db = db
+        # 版本号：站点/WIP 写操作 +1，供需求缓存失效判断
+        self.data_version = 0
+
+    def _bump(self) -> None:
+        self.data_version += 1
 
     # ---------- 站点 ----------
 
@@ -45,6 +50,7 @@ class PlanningRepo:
             "INSERT INTO stations (name, days_to_cp, stage, active) VALUES (?, ?, ?, 1)",
             (name, days_to_cp, stage),
         )
+        self._bump()
 
     def update_station(
         self, station_id: int, name: str, days_to_cp: float, active: bool = True, stage: str = "N2"
@@ -53,10 +59,12 @@ class PlanningRepo:
             "UPDATE stations SET name = ?, days_to_cp = ?, active = ?, stage = ? WHERE id = ?",
             (name, days_to_cp, 1 if active else 0, stage, station_id),
         )
+        self._bump()
 
     def delete_station(self, station_id: int) -> None:
         """彻底删除站点；其下 WIP 记录随外键级联删除（连接已开启外键）。"""
         self.db.execute("DELETE FROM stations WHERE id = ?", (station_id,))
+        self._bump()
 
     # ---------- WIP ----------
 
@@ -90,3 +98,4 @@ class PlanningRepo:
             "DO UPDATE SET qty = excluded.qty, updated_at = excluded.updated_at, updated_by = excluded.updated_by",
             (product_id, station_id, qty, timeutil.now_str(), operator),
         )
+        self._bump()

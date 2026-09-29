@@ -12,6 +12,11 @@ from app.utils import timeutil
 class ProductsRepo:
     def __init__(self, db: Database):
         self.db = db
+        # 版本号：产品相关写操作 +1，供预测/需求缓存失效判断
+        self.data_version = 0
+
+    def _bump(self) -> None:
+        self.data_version += 1
 
     def list_all(self, include_inactive: bool = False) -> list[sqlite3.Row]:
         sql = "SELECT * FROM products"
@@ -58,6 +63,7 @@ class ProductsRepo:
                 ),
             )
             return int(cur.lastrowid)
+        self._bump()
         return self.db.transaction(_do)  # type: ignore[return-value]
 
     def purchase_count(self, product_id: int) -> int:
@@ -86,6 +92,7 @@ class ProductsRepo:
                 f"该产品名下还有 {count} 张采购单，无法删除；请先在【采购管理 → 采购单】中删除或取消。"
             )
         self.db.execute("DELETE FROM products WHERE id = ?", (product_id,))
+        self._bump()
 
     def update(self, product_id: int, data: dict) -> None:
         self._validate(data)
@@ -104,3 +111,4 @@ class ProductsRepo:
                 product_id,
             ),
         )
+        self._bump()

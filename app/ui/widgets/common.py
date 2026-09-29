@@ -67,25 +67,38 @@ def make_table(headers: list[str], stretch_all: bool = False) -> QTableWidget:
 
 
 def fill_table(table: QTableWidget, rows: list[list], align_center_cols: set[int] | None = None):
+    """批量填表（性能优化版）。
+
+    - 填充期间关闭重绘、把列宽切到 Interactive：ResizeToContents 模式下每插入
+      一个单元格 Qt 都会重算一次全部列宽，几百行 × 几十列在老电脑上是秒级卡顿；
+    - 填完一次性切回 ResizeToContents + 末列拉伸，显示效果与之前完全一致。
+    """
     align_center_cols = align_center_cols or set()
-    table.setRowCount(0)
-    table.setRowCount(len(rows))
-    for r, row in enumerate(rows):
-        for c, value in enumerate(row):
-            item = QTableWidgetItem()
-            if isinstance(value, QWidget):
-                table.setCellWidget(r, c, value)
-                continue
-            if value is None:
-                text = ""
-            elif isinstance(value, float):
-                text = f"{value:,.0f}" if abs(value) >= 1000 else f"{value:g}"
-            else:
-                text = str(value)
-            item.setText(text)
-            if c in align_center_cols:
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            table.setItem(r, c, item)
+    header = table.horizontalHeader()
+    table.setUpdatesEnabled(False)
+    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    try:
+        table.clearContents()
+        table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                if isinstance(value, QWidget):
+                    table.setCellWidget(r, c, value)
+                    continue
+                if value is None:
+                    text = ""
+                elif isinstance(value, float):
+                    text = f"{value:,.0f}" if abs(value) >= 1000 else f"{value:g}"
+                else:
+                    text = str(value)
+                item = QTableWidgetItem(text)
+                if c in align_center_cols:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(r, c, item)
+    finally:
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)  # 全部列随内容自适应
+        header.setStretchLastSection(True)
+        table.setUpdatesEnabled(True)
 
 
 def summary_card(title: str, value: str, color: str = "#1F4E79") -> QFrame:

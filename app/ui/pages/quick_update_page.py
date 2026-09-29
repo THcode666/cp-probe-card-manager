@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QDate
+from PySide6.QtCore import QDate, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
@@ -36,7 +36,12 @@ class QuickUpdatePage(QWidget):
         llay = QVBoxLayout(left_box)
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("搜索针卡名…")
-        self.search_edit.textChanged.connect(self._fill_card_list)
+        # 250ms 防抖：卡数多时逐键全量过滤会卡输入，停顿后一次性过滤
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(self._fill_card_list)
+        self.search_edit.textChanged.connect(self._search_timer.start)
         self.card_combo = QComboBox()
         llay.addWidget(self.search_edit)
         llay.addWidget(self.card_combo, 1)

@@ -51,6 +51,18 @@ class DemandService:
         self.planning = planning_repo
         self.prediction = prediction
         self.settings = settings_repo
+        # ---- 性能缓存（重构优化）----
+        # compute_for_product 单卡预测借力 PredictionService 缓存；
+        # 这里再按版本缓存整个 ProductDemand，主控面板/采购页不再重复推算。
+        self._demand_cache: dict[int, tuple[tuple, ProductDemand]] = {}
+
+    def _cache_versions(self) -> tuple:
+        return (
+            self.products.data_version,
+            self.planning.data_version,
+            self.settings.data_version,
+            self.prediction._cache_versions(),
+        )
 
     @property
     def horizon_days(self) -> int:
@@ -97,6 +109,15 @@ class DemandService:
         return len(rows)
 
     def compute_for_product(self, product_id: int) -> ProductDemand:
+        key = self._cache_versions()
+        hit = self._demand_cache.get(product_id)
+        if hit and hit[0] == key:
+            return hit[1]
+        demand = self._compute_for_product_uncached(product_id)
+        self._demand_cache[product_id] = (key, demand)
+        return demand
+
+    def _compute_for_product_uncached(self, product_id: int) -> ProductDemand:
         p = self.products.get(product_id)
         demand = ProductDemand(
             product_id=product_id,
