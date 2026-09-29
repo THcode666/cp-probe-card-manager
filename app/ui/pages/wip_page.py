@@ -185,6 +185,7 @@ class WipPage(QWidget):
             for s in stations:
                 headers.append(f"{s['name']}\n(只记数量)")
         self._filling = True
+        header = table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)  # 填充期间不逐格重排
         table.setUpdatesEnabled(False)
         table.clear()

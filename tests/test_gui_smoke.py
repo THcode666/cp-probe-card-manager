@@ -77,14 +77,22 @@ def seeded_ctx(tmp_path):
 
 
 def test_all_pages_refresh(qapp, seeded_ctx):
+    from app.ui import main_window as mw
     from app.ui.main_window import MainWindow
 
     # 用户管理有管理密码门禁：测试中直接放行（密码门禁另由服务测试覆盖常量）
     MainWindow._ask_module_password = lambda self: True
+    # 页面刷新出错时界面层会弹错误框继续运行（用户可见"操作失败"）。
+    # 测试中把它改为直接抛出，任何页面 refresh 的异常都必须让测试失败，
+    # 防止此类错误被兜底逻辑吞掉（如变量未定义只在个别页面触发）。
+    def _raise(exc):
+        raise RuntimeError(f"页面刷新出错: {exc}")
+    mw.error_box = _raise
     win = MainWindow(seeded_ctx)
     assert win.nav.item(win.nav.count() - 1).text() == "用户管理"  # 固定在导航最下方
     for i in range(win.nav.count()):
         win.nav.setCurrentRow(i)  # 触发 _switch_page → page.refresh()
+        qapp.processEvents()
     win.close()
 
 
