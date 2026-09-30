@@ -122,7 +122,7 @@ class WarehousePage(QWidget):
     def _refresh_logs(self):
         rows = [
             [r["ts"], r["operator"], r["module"], r["action"], r["detail"]]
-            for r in self.ctx.audit_repo.list_recent(limit=120)
+            for r in self.ctx.audit_repo.list_recent(limit=120, module="仓库")
         ]
         fill_table(self.log_table, rows)
 

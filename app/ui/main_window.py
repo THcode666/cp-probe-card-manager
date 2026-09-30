@@ -199,6 +199,20 @@ class MainWindow(QMainWindow):
             except Exception as e:  # noqa: BLE001
                 error_box(self, e)
 
+    def _check_module_password(self, candidate: str) -> bool:
+        """校验管理密码并记录审计（成功/失败都留痕）。独立成方法便于测试。"""
+        import hmac as _hmac
+
+        from app.constants import USER_MODULE_PASSWORD
+
+        if _hmac.compare_digest(candidate, USER_MODULE_PASSWORD):
+            # 进入模块成功同样记审计：敏感模块的每次访问都留痕（失败路径为"访问被拒"）
+            self.ctx.audit_repo.log(self.ctx.operator, "用户管理", "进入用户管理", "管理密码验证通过")
+            return True
+        error_box(self, "管理密码不正确")
+        self.ctx.audit_repo.log(self.ctx.operator, "用户管理", "访问被拒", "管理密码错误")
+        return False
+
     def _ask_module_password(self) -> bool:
         """【用户管理】进入密码对话框。返回是否通过。"""
         dlg = QDialog(self)
@@ -219,15 +233,7 @@ class MainWindow(QMainWindow):
         pwd.setFocus()
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return False
-        import hmac as _hmac
-
-        from app.constants import USER_MODULE_PASSWORD
-
-        if _hmac.compare_digest(pwd.text(), USER_MODULE_PASSWORD):
-            return True
-        error_box(self, "管理密码不正确")
-        self.ctx.audit_repo.log(self.ctx.operator, "用户管理", "访问被拒", "管理密码错误")
-        return False
+        return self._check_module_password(pwd.text())
 
     def refresh_all(self):
         for _, page in self._pages:

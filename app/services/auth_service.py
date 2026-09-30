@@ -100,7 +100,7 @@ class AuthService:
             raise ValueError("原密码不正确")
         self._validate_password(new_password)
         self.users.set_password(user_id, new_password)
-        self.audit.log(user["username"], "用户管理", "修改密码")
+        self.audit.log(user["username"], "用户管理", "修改密码", f"用户：{user['username']}")
 
     def reset_password(self, operator: str, user_id: int, new_password: str) -> None:
         self._require_admin(operator)

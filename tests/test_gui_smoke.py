@@ -85,15 +85,19 @@ def test_all_pages_refresh(qapp, seeded_ctx):
     # 页面刷新出错时界面层会弹错误框继续运行（用户可见"操作失败"）。
     # 测试中把它改为直接抛出，任何页面 refresh 的异常都必须让测试失败，
     # 防止此类错误被兜底逻辑吞掉（如变量未定义只在个别页面触发）。
-    def _raise(exc):
-        raise RuntimeError(f"页面刷新出错: {exc}")
+    def _raise(*args, **kwargs):
+        raise RuntimeError(f"页面刷新出错: {args[1] if len(args) > 1 else args}")
+    orig_error_box = mw.error_box
     mw.error_box = _raise
-    win = MainWindow(seeded_ctx)
-    assert win.nav.item(win.nav.count() - 1).text() == "用户管理"  # 固定在导航最下方
-    for i in range(win.nav.count()):
-        win.nav.setCurrentRow(i)  # 触发 _switch_page → page.refresh()
-        qapp.processEvents()
-    win.close()
+    try:
+        win = MainWindow(seeded_ctx)
+        assert win.nav.item(win.nav.count() - 1).text() == "用户管理"  # 固定在导航最下方
+        for i in range(win.nav.count()):
+            win.nav.setCurrentRow(i)  # 触发 _switch_page → page.refresh()
+            qapp.processEvents()
+        win.close()
+    finally:
+        mw.error_box = orig_error_box  # 还原，避免泄漏到其他测试
 
 
 def test_users_module_password_gate(qapp, seeded_ctx):
@@ -118,6 +122,22 @@ def test_users_module_password_gate(qapp, seeded_ctx):
     assert win2.stack.currentIndex() == win2.nav.count() - 1
     win2.close()
     assert USER_MODULE_PASSWORD == "change-me-admin"
+
+
+def test_users_module_access_logged(qapp, seeded_ctx):
+    """进入用户管理模块（管理密码验证通过）也要记审计，与失败路径对称。"""
+    from app.constants import USER_MODULE_PASSWORD
+    from app.ui.main_window import MainWindow
+
+    win = MainWindow(seeded_ctx)
+    # 正确密码 → 通过并记"进入用户管理"
+    assert win._check_module_password(USER_MODULE_PASSWORD) is True
+    # 错误密码 → 拒绝并记"访问被拒"
+    assert win._check_module_password("wrong-pwd") is False
+    actions = [r["action"] for r in seeded_ctx.audit_repo.list_recent(limit=50)]
+    assert "进入用户管理" in actions
+    assert "访问被拒" in actions
+    win.close()
 
 
 def test_dashboard_values(qapp, seeded_ctx):

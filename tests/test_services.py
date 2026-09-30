@@ -46,9 +46,11 @@ def _add(ctx, card_id, date, touches, length):
 
 def test_db_init_and_default_admin(ctx):
     assert ctx.settings_repo.get("scrap_needle_len_um") == "22"
-    # 内置管理员可直接登录（演示默认密码，首次登录后应立即修改）
     admin = ctx.users_repo.get_by_username("admin")
     assert admin is not None and admin["role"] == "管理员"
+    # 内置管理员 admin
+    ne = ctx.users_repo.get_by_username("admin")
+    assert ne is not None and ne["role"] == "管理员"
     assert ctx.auth.login("admin", "Admin@12345")["role"] == "管理员"
 
 
@@ -85,7 +87,9 @@ def test_register_with_activation_code(ctx):
 
 def test_admin_view_password(ctx):
     """管理员可查看（注册/新建/重置过的）账号密码明文。"""
-    uid = ctx.auth.register("zhangsan", "s3cret99", "change-me-activation")
+    from app.constants import ACTIVATION_CODE
+
+    uid = ctx.auth.register("zhangsan", "s3cret99", ACTIVATION_CODE)
     assert ctx.auth.reveal_password("admin", uid) == "s3cret99"
     # 重置后查看的是新密码
     ctx.auth.reset_password("admin", uid, "newpass88")
@@ -93,6 +97,28 @@ def test_admin_view_password(ctx):
     # 查看动作写审计日志
     logs = ctx.audit_repo.list_recent()
     assert any("查看密码" in l["action"] for l in logs)
+
+
+def test_password_ops_all_audited_and_filterable(ctx):
+    """三类密码操作全部留痕，且操作日志支持按模块筛出（展示层不再淹没在数据刷屏里）。"""
+    from app.constants import ACTIVATION_CODE
+
+    uid = ctx.auth.register("lisi", "pass123", ACTIVATION_CODE)
+    ctx.auth.reveal_password("admin", uid)                       # 查看密码
+    ctx.auth.reset_password("admin", uid, "reset99")             # 重置密码
+    ctx.auth.change_password(uid, "reset99", "final88")          # 自己改自己密码
+
+    # 按模块精确筛选：只看"用户管理"，密码相关动作必须全部可查到
+    rows = ctx.audit_repo.list_recent(limit=100, module="用户管理")
+    actions = [r["action"] for r in rows]
+    assert "查看密码" in actions
+    assert "重置密码" in actions
+    assert "修改密码" in actions
+    # 模块筛选不影响其他模块日志的存在性
+    all_rows = ctx.audit_repo.list_recent(limit=100)
+    assert any(r["module"] == "注册" for r in all_rows)
+    # 模块清单来自库内真实模块
+    assert "用户管理" in ctx.audit_repo.list_modules()
 
 
 def test_admin_delete_user_rules(ctx):
